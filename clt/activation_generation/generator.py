@@ -13,32 +13,33 @@ Public API is unchanged: create with `ActivationGeneratorConfig`, call
 
 from __future__ import annotations
 
-import os
-import time
 import json
+import logging
 import math
+import os
 import queue
 import random
 import shutil
 import signal
-import logging
 import threading
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Generator, Tuple, Any
-
-import torch
-import numpy as np
-import h5py
-from tqdm import tqdm
-import requests
+from typing import Any, Dict, Generator, List, Optional, Tuple
 from urllib.parse import quote, urljoin
+
+import h5py
+import numpy as np
+import requests
+import torch
+from tqdm import tqdm
+
+from clt.config.data_config import ActivationConfig  # noqa: E402
 
 # ––– local imports (keep relative to package root) –––
 from clt.nnsight.extractor import ActivationExtractorCLT  # noqa: E402
-from clt.config.data_config import ActivationConfig  # noqa: E402
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 ActivationBatch = Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]
 
@@ -112,7 +113,7 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
         for attempt in range(max_retries_per_chunk):
             try:
                 print(
-                    f"[Uploader Thread Attempt {attempt+1}/{max_retries_per_chunk}] Uploading chunk: {p.name} to {url}"
+                    f"[Uploader Thread Attempt {attempt + 1}/{max_retries_per_chunk}] Uploading chunk: {p.name} to {url}"
                 )
                 with open(p, "rb") as f:
                     files = {"chunk_file": (p.name, f, "application/x-hdf5")}
@@ -126,14 +127,20 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
 
                     # Check status code for retry logic
                     if r.ok:  # 2xx status codes
-                        logger.info(f"Uploaded {p.name} -> {r.status_code} on attempt {attempt + 1}")
+                        logger.info(
+                            f"Uploaded {p.name} -> {r.status_code} on attempt {attempt + 1}"
+                        )
                         upload_success = True
                         if cfg.delete_after_upload:
                             try:
                                 p.unlink(missing_ok=True)
-                                logger.debug(f"Deleted local chunk {p.name} after successful upload.")
+                                logger.debug(
+                                    f"Deleted local chunk {p.name} after successful upload."
+                                )
                             except OSError as unlink_err:
-                                logger.warning(f"Failed to delete chunk {p.name} after upload: {unlink_err}")
+                                logger.warning(
+                                    f"Failed to delete chunk {p.name} after upload: {unlink_err}"
+                                )
                         break  # Exit retry loop on success
                     else:
                         # Non-2xx status codes - decide whether to retry
@@ -144,7 +151,9 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
                                 f"Upload attempt {attempt + 1} for {p.name} failed with retryable status {r.status_code}: {r.text}"
                             )
                         elif r.status_code == 507:
-                            logger.error(f"Upload failed for {p.name}: Server out of storage (507). Not retrying.")
+                            logger.error(
+                                f"Upload failed for {p.name}: Server out of storage (507). Not retrying."
+                            )
                             # Non-retryable error
                         elif 400 <= r.status_code < 500:
                             logger.error(
@@ -162,18 +171,27 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
                         # For retryable errors, continue to backoff logic below
 
             except requests.exceptions.Timeout as e:
-                logger.warning(f"Upload attempt {attempt + 1} for {p.name} timed out: {e}")
+                logger.warning(
+                    f"Upload attempt {attempt + 1} for {p.name} timed out: {e}"
+                )
                 is_retryable = True  # Treat timeouts as retryable
             except requests.exceptions.ConnectionError as e:
-                logger.warning(f"Upload attempt {attempt + 1} for {p.name} failed due to connection error: {e}")
+                logger.warning(
+                    f"Upload attempt {attempt + 1} for {p.name} failed due to connection error: {e}"
+                )
                 is_retryable = True  # Treat connection errors as retryable
             except requests.exceptions.RequestException as e:
                 # Catch other potential request exceptions (e.g., DNS errors)
-                logger.warning(f"Upload attempt {attempt + 1} for {p.name} failed with request exception: {e}")
+                logger.warning(
+                    f"Upload attempt {attempt + 1} for {p.name} failed with request exception: {e}"
+                )
                 is_retryable = True  # Generally treat these as retryable
             except Exception as e:
                 # Catch unexpected errors during file open, etc.
-                logger.error(f"Unexpected error during upload attempt {attempt + 1} for {p.name}: {e}", exc_info=True)
+                logger.error(
+                    f"Unexpected error during upload attempt {attempt + 1} for {p.name}: {e}",
+                    exc_info=True,
+                )
                 is_retryable = False  # Don't retry unexpected code errors
                 break  # Exit retry loop
 
@@ -182,10 +200,14 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
                 backoff_time = min(initial_backoff * (2**attempt), max_backoff)
                 jitter = backoff_time * 0.1
                 sleep_time = backoff_time + random.uniform(-jitter, jitter)
-                logger.info(f"Retrying upload of {p.name} in {sleep_time:.2f} seconds...")
+                logger.info(
+                    f"Retrying upload of {p.name} in {sleep_time:.2f} seconds..."
+                )
                 time.sleep(sleep_time)
             elif not is_retryable:
-                logger.error(f"Upload failed for {p.name} due to non-retryable error. Stopping attempts.")
+                logger.error(
+                    f"Upload failed for {p.name} due to non-retryable error. Stopping attempts."
+                )
                 break  # Exit retry loop immediately if error is non-retryable
 
         # --- After Retry Loop --- #
@@ -202,6 +224,120 @@ def _async_uploader(upload_q: "queue.Queue[Path]", cfg: ActivationConfig):
         # regardless of success, failure, or retries.
         upload_q.task_done()
         # --> END MOVED <--
+
+
+def _async_writer_worker(
+    worker_id: int,
+    write_q: "queue.Queue[Tuple[int, Dict[int, List[torch.Tensor]], Dict[int, List[torch.Tensor]], List[int], int, int, List[np.ndarray], int, torch.dtype, Path]]",
+    manifest_lock: threading.Lock,
+    upload_q: Optional["queue.Queue[Path]"] = None,
+    storage_type: str = "local",
+    stop_event: threading.Event = None,
+):
+    logger.info(f"Writer worker {worker_id} started")
+    while not (stop_event and stop_event.is_set()):
+        try:
+            task = write_q.get(timeout=0.5)
+
+            if task is None:
+                write_q.task_done()
+                write_q.put(None)
+                logger.info(f"Writer worker {worker_id} shutting down")
+                break
+
+            (
+                chunk_idx,
+                buf_inp,
+                buf_tgt,
+                layer_ids,
+                d_model,
+                rows,
+                manifest_rows,
+                offset,
+                torch_dtype,
+                out_dir,
+            ) = task
+
+            start_time = time.monotonic()
+            perm = torch.randperm(rows)
+            p = out_dir / f"chunk_{chunk_idx}.h5"
+
+            logger.debug(
+                f"Worker {worker_id} writing chunk {chunk_idx} with {rows} rows"
+            )
+
+            # --- Determine h5py dtype string from torch dtype --- #
+            if torch_dtype == torch.float32:
+                h5py_dtype_str = "float32"
+            elif torch_dtype == torch.float16:
+                h5py_dtype_str = "float16"
+            elif torch_dtype == torch.bfloat16:
+                # h5py doesn't natively support bfloat16, store as uint16
+                h5py_dtype_str = "uint16"
+                logger.warning(
+                    "Storing bfloat16 as uint16 in HDF5. Ensure client handles conversion."
+                )
+            else:
+                logger.error(f"Unsupported torch_dtype for HDF5: {torch_dtype}")
+                write_q.task_done()
+                continue  # Skip this chunk
+            # ----------------------------------------------------- #
+
+            # Create manifest rows for this chunk
+            m = np.empty((rows, 2), dtype="<u4")
+            m[:, 0] = chunk_idx
+            m[:, 1] = np.arange(rows, dtype="<u4")
+
+            try:
+                with h5py.File(p, "w", libver="latest") as hf:
+                    _create_datasets(
+                        hf, layer_ids, rows, d_model, h5py_dtype=h5py_dtype_str
+                    )
+                    for lid in layer_ids:
+                        inp = torch.cat(buf_inp[lid], 0)[perm].to(torch_dtype).numpy()
+                        tgt = torch.cat(buf_tgt[lid], 0)[perm].to(torch_dtype).numpy()
+                        # View casting for bfloat16 before saving
+                        if h5py_dtype_str == "uint16" and inp.dtype == np.dtype(
+                            "bfloat16"
+                        ):
+                            inp = inp.view(np.uint16)
+                            tgt = tgt.view(np.uint16)
+
+                        hf[f"layer_{lid}/inputs"][:] = inp
+                        hf[f"layer_{lid}/targets"][:] = tgt
+
+                with manifest_lock:
+                    manifest_rows.append(m)
+
+                end_time = time.monotonic()
+                logger.debug(
+                    f"Worker {worker_id}: chunk {chunk_idx} written ({rows} rows) in {end_time - start_time:.3f} seconds"
+                )
+
+                # Queue for upload if needed
+                if storage_type == "remote" and upload_q is not None:
+                    upload_q.put(p)
+
+            except (IOError, OSError) as e:
+                logger.error(
+                    f"Worker {worker_id}: Failed to write HDF5 chunk {p}: {e}",
+                    exc_info=True,
+                )
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        f"Worker {worker_id}: Failed to remove partial chunk file {p} after write error."
+                    )
+
+            write_q.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Worker {worker_id}: Unexpected error: {e}", exc_info=True)
+            continue
+
+    logger.info(f"Writer worker {worker_id} exited")
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +382,9 @@ class _RunningStat:
 
     def finalize(self) -> Tuple[np.ndarray, np.ndarray]:
         var = self.M2 / max(self.n - 1, 1)
-        return self.mean.cpu().numpy().astype("float32"), np.sqrt(var).cpu().numpy().astype("float32")
+        return self.mean.cpu().numpy().astype("float32"), np.sqrt(
+            var
+        ).cpu().numpy().astype("float32")
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +397,9 @@ class ActivationGenerator:
         try:
             self.torch_dtype = getattr(torch, cfg.activation_dtype)
         except AttributeError:
-            logger.warning(f"Invalid activation_dtype '{cfg.activation_dtype}' in config. Defaulting to bfloat16.")
+            logger.warning(
+                f"Invalid activation_dtype '{cfg.activation_dtype}' in config. Defaulting to bfloat16."
+            )
             self.torch_dtype = torch.bfloat16
         self.extractor = ActivationExtractorCLT(
             model_name=cfg.model_name,
@@ -276,29 +416,123 @@ class ActivationGenerator:
         )
         # Paths
         ds_name = os.path.basename(cfg.dataset_path)
-        self.out_dir = Path(cfg.activation_dir) / cfg.model_name / f"{ds_name}_{cfg.dataset_split}"
+        self.out_dir = (
+            Path(cfg.activation_dir) / cfg.model_name / f"{ds_name}_{cfg.dataset_split}"
+        )
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_tmp = self.out_dir / "index.tmp"
         self.manifest_final = self.out_dir / "index.bin"
+
+        self.manifest_lock = threading.Lock()
+        self.writer_stop_event = threading.Event()
+
         # Background uploader
         self.upload_q: "queue.Queue[Path]" = queue.Queue()
         if cfg.remote_server_url:
-            self.uploader = threading.Thread(target=_async_uploader, args=(self.upload_q, cfg), daemon=True)
+            self.uploader = threading.Thread(
+                target=_async_uploader, args=(self.upload_q, cfg), daemon=True
+            )
             self.uploader.start()
         else:
             self.uploader = None
-
-        # ------------------------------------------------------------------
-        # Storage mode handling
-        # ------------------------------------------------------------------
 
         # Default storage mode is inferred from whether a remote URL is
         # configured. Users can later override via `set_storage_type()`.
         self.storage_type: str = "remote" if cfg.remote_server_url else "local"
         if self.storage_type == "remote" and not cfg.remote_server_url:
-            raise ValueError("Storage type is 'remote' but no remote_server_url is configured.")
+            raise ValueError(
+                "Storage type is 'remote' but no remote_server_url is configured."
+            )
 
-    # ------------------------------------------------------------------
+        # Setup the writer thread pool
+        self.num_writer_threads = os.cpu_count() // 2
+        self.write_q = queue.Queue(256)
+        self.writer_threads = []
+        self._start_writer_threads()
+
+        logger.info(f"Initialized with {self.num_writer_threads} writer threads")
+
+    def _start_writer_threads(self):
+        self.writer_stop_event.clear()
+        self.writer_threads = []
+
+        for i in range(self.num_writer_threads):
+            worker = threading.Thread(
+                target=_async_writer_worker,
+                args=(
+                    i,
+                    self.write_q,
+                    self.manifest_lock,
+                    self.upload_q,
+                    self.storage_type,
+                    self.writer_stop_event,
+                ),
+                daemon=True,
+                name=f"writer-{i}",
+            )
+            worker.start()
+            self.writer_threads.append(worker)
+
+    def _stop_writer_threads(self):
+        if not self.writer_threads:
+            return
+
+        # Signal all threads to stop
+        self.writer_stop_event.set()
+        self.write_q.put(None)
+
+        for thread in self.writer_threads:
+            if thread.is_alive():
+                thread.join(timeout=5.0)
+
+        self.writer_threads = []
+        self.writer_stop_event.clear()
+
+    def set_storage_type(self, storage_type: str):
+        """Explicitly select 'local' or 'remote' storage.
+
+        This mirrors the API of the earlier generator implementation so that
+        existing tutorials continue to work. When switching *from* remote to
+        local we shut down the background uploader thread to avoid leaking
+        resources. When switching *to* remote we lazily start the uploader
+        thread if it has not already been created.
+        """
+
+        st = storage_type.lower()
+        if st not in {"local", "remote"}:
+            raise ValueError("storage_type must be 'local' or 'remote'")
+
+        # If nothing changes, we are done.
+        if st == self.storage_type:
+            return
+
+        # Update internal storage type
+        self.storage_type = st
+
+        # Switching to remote: ensure server URL is configured and uploader is
+        # running.
+        if st == "remote":
+            if self.cfg.remote_server_url is None:
+                raise ValueError(
+                    "Cannot set storage_type to 'remote' because "
+                    "cfg.remote_server_url is not configured."
+                )
+            if self.uploader is None:
+                # Lazily start a new uploader thread
+                self.uploader = threading.Thread(
+                    target=_async_uploader, args=(self.upload_q, self.cfg), daemon=True
+                )
+                self.uploader.start()
+        else:  # switching to local
+            if self.uploader is not None:
+                self.upload_q.put(None)
+                self.uploader.join()
+                self.uploader = None
+
+        # Restart the writer threads with the new storage_type
+        self._stop_writer_threads()
+        self._start_writer_threads()
+
     def generate_and_save(self):
         cfg = self.cfg
         stream = self.extractor.stream_activations(
@@ -346,7 +580,9 @@ class ActivationGenerator:
                             "inputs": _RunningStat(d_model),
                             "targets": _RunningStat(d_model),
                         }
-                logger.info("Layers=%d d_model=%d dtype=%s", len(layer_ids), d_model, dtype_str)
+                logger.info(
+                    "Layers=%d d_model=%d dtype=%s", len(layer_ids), d_model, dtype_str
+                )
 
             n_tok = batch_inp[layer_ids[0]].shape[0]
             for lid in layer_ids:
@@ -365,17 +601,26 @@ class ActivationGenerator:
             cur_rows = sum(t.shape[0] for t in buf_inp[layer_ids[0]])
             if cur_rows >= chunk_tokens:
                 # Write *all* accumulated rows so far (variable‑size chunk).
-                self._write_chunk(
-                    c_idx,
-                    buf_inp,
-                    buf_tgt,
-                    layer_ids,
-                    d_model,
-                    cur_rows,
-                    manifest_rows,
-                    g_row - cur_rows,
+                inp_copy = {lid: buf_inp[lid].copy() for lid in layer_ids}
+                tgt_copy = {lid: buf_tgt[lid].copy() for lid in layer_ids}
+
+                self.write_q.put(
+                    (
+                        c_idx,
+                        inp_copy,
+                        tgt_copy,
+                        layer_ids,
+                        d_model,
+                        cur_rows,
+                        manifest_rows,
+                        g_row - cur_rows,
+                        self.torch_dtype,
+                        self.out_dir,
+                    )
                 )
+
                 c_idx += 1
+
                 # Clear buffers for next chunk
                 for lid in layer_ids:
                     buf_inp[lid].clear()
@@ -384,21 +629,35 @@ class ActivationGenerator:
         # Flush final partial chunk
         if layer_ids and buf_inp[layer_ids[0]]:
             rows = sum(t.shape[0] for t in buf_inp[layer_ids[0]])
-            self._write_chunk(
-                c_idx,
-                buf_inp,
-                buf_tgt,
-                layer_ids,
-                d_model,
-                rows,
-                manifest_rows,
-                g_row - rows,
+
+            inp_copy = {lid: buf_inp[lid].copy() for lid in layer_ids}
+            tgt_copy = {lid: buf_tgt[lid].copy() for lid in layer_ids}
+
+            self.write_q.put(
+                (
+                    c_idx,
+                    inp_copy,
+                    tgt_copy,
+                    layer_ids,
+                    d_model,
+                    rows,
+                    manifest_rows,
+                    g_row - rows,
+                    self.torch_dtype,
+                    self.out_dir,
+                )
             )
+
             c_idx += 1
 
+        logger.info("Waiting for writer threads to finish...")
+        self.write_q.put(None)
+        self.write_q.join()
+
         # Write manifest to disk (concatenate to keep correct order)
-        manifest_arr = np.concatenate(manifest_rows, axis=0)
-        manifest_arr.tofile(self.manifest_final)
+        with self.manifest_lock:
+            manifest_arr = np.concatenate(manifest_rows, axis=0)
+            manifest_arr.tofile(self.manifest_final)
 
         # Upload final manifest if remote
         if self.storage_type == "remote" and self.manifest_final.exists():
@@ -406,6 +665,9 @@ class ActivationGenerator:
                 self._upload_binary_file(self.manifest_final, "manifest")
             except Exception as e:
                 logger.warning("Failed to upload manifest.bin: %s", e)
+
+        # Clean up writer threads
+        self._stop_writer_threads()
 
         # Write metadata JSON
         meta = {
@@ -463,111 +725,6 @@ class ActivationGenerator:
         logger.info("Finished: %d chunks, %s tokens", c_idx, f"{g_row:,}")
 
     # ------------------------------------------------------------------
-    def _write_chunk(
-        self,
-        chunk_idx: int,
-        buf_inp: Dict[int, List[torch.Tensor]],
-        buf_tgt: Dict[int, List[torch.Tensor]],
-        layer_ids: List[int],
-        d_model: int,
-        rows: int,
-        manifest_rows: List[np.ndarray],
-        offset: int,
-    ):
-        perm = torch.randperm(rows)
-        p = self.out_dir / f"chunk_{chunk_idx}.h5"
-
-        # --- Determine h5py dtype string from torch dtype --- #
-        if self.torch_dtype == torch.float32:
-            h5py_dtype_str = "float32"
-        elif self.torch_dtype == torch.float16:
-            h5py_dtype_str = "float16"
-        elif self.torch_dtype == torch.bfloat16:
-            # h5py doesn't natively support bfloat16, store as uint16
-            # Note: Client needs to be aware of this if using bfloat16
-            h5py_dtype_str = "uint16"
-            logger.warning("Storing bfloat16 as uint16 in HDF5. Ensure client handles conversion.")
-        else:
-            raise ValueError(f"Unsupported torch_dtype for HDF5: {self.torch_dtype}")
-        # ----------------------------------------------------- #
-
-        try:
-            with h5py.File(p, "w", libver="latest") as hf:
-                _create_datasets(hf, layer_ids, rows, d_model, h5py_dtype=h5py_dtype_str)
-                for lid in layer_ids:
-                    inp = torch.cat(buf_inp[lid], 0)[perm].to(self.torch_dtype).numpy()
-                    tgt = torch.cat(buf_tgt[lid], 0)[perm].to(self.torch_dtype).numpy()
-                    # View casting for bfloat16 before saving
-                    if h5py_dtype_str == "uint16" and inp.dtype == np.dtype("bfloat16"):
-                        inp = inp.view(np.uint16)
-                        tgt = tgt.view(np.uint16)
-
-                    hf[f"layer_{lid}/inputs"][:] = inp
-                    hf[f"layer_{lid}/targets"][:] = tgt
-        except (IOError, OSError) as e:
-            logger.error(f"Failed to write HDF5 chunk {p}: {e}", exc_info=True)
-            # Attempt to remove potentially corrupted partial file
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(f"Failed to remove partial chunk file {p} after write error.")
-            # Re-raise to halt generation
-            raise RuntimeError(f"Fatal error writing HDF5 chunk {chunk_idx}") from e
-
-        # Append manifest rows for this chunk
-        m = np.empty((rows, 2), dtype="<u4")
-        m[:, 0] = chunk_idx
-        m[:, 1] = np.arange(rows, dtype="<u4")
-        manifest_rows.append(m)
-
-        logger.debug("chunk %d written (%d rows)", chunk_idx, rows)
-        if self.storage_type == "remote" and self.uploader:
-            self.upload_q.put(p)
-
-    # ------------------------------------------------------------------
-    def set_storage_type(self, storage_type: str):
-        """Explicitly select 'local' or 'remote' storage.
-
-        This mirrors the API of the earlier generator implementation so that
-        existing tutorials continue to work. When switching *from* remote to
-        local we shut down the background uploader thread to avoid leaking
-        resources. When switching *to* remote we lazily start the uploader
-        thread if it has not already been created.
-        """
-
-        st = storage_type.lower()
-        if st not in {"local", "remote"}:
-            raise ValueError("storage_type must be 'local' or 'remote'")
-
-        # If nothing changes, we are done.
-        if st == self.storage_type:
-            return
-
-        # Switching to remote: ensure server URL is configured and uploader is
-        # running.
-        if st == "remote":
-            if self.cfg.remote_server_url is None:
-                raise ValueError(
-                    "Cannot set storage_type to 'remote' because " "cfg.remote_server_url is not configured."
-                )
-            if self.uploader is None:
-                # Lazily start a new uploader thread
-                self.uploader = threading.Thread(
-                    target=_async_uploader,
-                    args=(self.upload_q, self.cfg),
-                    daemon=True,
-                )
-                self.uploader.start()
-        else:  # switching to local
-            if self.uploader is not None:
-                # Gracefully terminate the uploader thread
-                self.upload_q.put(None)
-                self.uploader.join()
-                self.uploader = None
-
-        self.storage_type = st
-
-    # ------------------------------------------------------------------
     def _upload_json(self, path: Path, endpoint: str):
         """Upload metadata or norm_stats JSON to the server.
 
@@ -584,7 +741,9 @@ class ActivationGenerator:
             raise ValueError("remote_server_url is not configured for upload")
 
         dataset_name = os.path.basename(self.cfg.dataset_path)
-        dataset_id = quote(f"{self.cfg.model_name}/{dataset_name}_{self.cfg.dataset_split}", safe="")
+        dataset_id = quote(
+            f"{self.cfg.model_name}/{dataset_name}_{self.cfg.dataset_split}", safe=""
+        )
         # Point directly to the root-mounted slice server endpoints
         base = self.cfg.remote_server_url.rstrip("/") + "/"
         url = urljoin(base, f"datasets/{dataset_id}/{endpoint}")
@@ -596,16 +755,26 @@ class ActivationGenerator:
 
                 r = requests.post(url, json=data, timeout=60)
                 r.raise_for_status()
-                logger.info(f"Successfully uploaded {path.name} to {endpoint} endpoint on attempt {attempt + 1}")
+                logger.info(
+                    f"Successfully uploaded {path.name} to {endpoint} endpoint on attempt {attempt + 1}"
+                )
                 return  # Success
             except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to upload {path.name} to {endpoint}: {e}")
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed to upload {path.name} to {endpoint}: {e}"
+                )
                 if attempt + 1 == max_retries:
-                    logger.error(f"Final attempt failed to upload {path.name}. Giving up.")
-                    raise RuntimeError(f"Failed to upload {path.name} after {max_retries} attempts") from e
+                    logger.error(
+                        f"Final attempt failed to upload {path.name}. Giving up."
+                    )
+                    raise RuntimeError(
+                        f"Failed to upload {path.name} after {max_retries} attempts"
+                    ) from e
                 else:
                     delay = base_delay * (2**attempt)
-                    logger.info(f"Retrying upload of {path.name} in {delay:.1f} seconds...")
+                    logger.info(
+                        f"Retrying upload of {path.name} in {delay:.1f} seconds..."
+                    )
                     time.sleep(delay)
 
     # ------------------------------------------------------------------
@@ -622,7 +791,9 @@ class ActivationGenerator:
             raise ValueError("remote_server_url is not configured for upload")
 
         dataset_name = os.path.basename(self.cfg.dataset_path)
-        dataset_id = quote(f"{self.cfg.model_name}/{dataset_name}_{self.cfg.dataset_split}", safe="")
+        dataset_id = quote(
+            f"{self.cfg.model_name}/{dataset_name}_{self.cfg.dataset_split}", safe=""
+        )
         base = self.cfg.remote_server_url.rstrip("/") + "/"  # Point to root
         url = urljoin(base, f"datasets/{dataset_id}/{endpoint}")
 
@@ -636,23 +807,36 @@ class ActivationGenerator:
                     # Add other endpoint -> key mappings here if necessary
 
                     files = {file_key: (path.name, f, "application/octet-stream")}
-                    r = requests.post(url, files=files, timeout=300)  # Increased timeout
+                    r = requests.post(
+                        url, files=files, timeout=300
+                    )  # Increased timeout
                     r.raise_for_status()
-                    logger.info(f"Successfully uploaded {path.name} to {endpoint} endpoint on attempt {attempt + 1}")
+                    logger.info(
+                        f"Successfully uploaded {path.name} to {endpoint} endpoint on attempt {attempt + 1}"
+                    )
                     return  # Success
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to upload {path.name} to {endpoint}: {e}")
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed to upload {path.name} to {endpoint}: {e}"
+                )
                 if attempt + 1 == max_retries:
-                    logger.error(f"Final attempt failed to upload {path.name}. Giving up.")
-                    raise RuntimeError(f"Failed to upload {path.name} after {max_retries} attempts") from e
+                    logger.error(
+                        f"Final attempt failed to upload {path.name}. Giving up."
+                    )
+                    raise RuntimeError(
+                        f"Failed to upload {path.name} after {max_retries} attempts"
+                    ) from e
                 else:
                     delay = base_delay * (2**attempt)
-                    logger.info(f"Retrying upload of {path.name} in {delay:.1f} seconds...")
+                    logger.info(
+                        f"Retrying upload of {path.name} in {delay:.1f} seconds..."
+                    )
                     time.sleep(delay)
             except Exception as e:
                 # Catch other potential errors during file handling/request prep
                 logger.error(
-                    f"Unexpected error during upload attempt {attempt + 1} for {path.name}: {e}", exc_info=True
+                    f"Unexpected error during upload attempt {attempt + 1} for {path.name}: {e}",
+                    exc_info=True,
                 )
                 # Treat unexpected errors as fatal for now
                 raise RuntimeError(f"Unexpected error uploading {path.name}") from e
@@ -660,7 +844,9 @@ class ActivationGenerator:
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import yaml, argparse
+    import argparse
+
+    import yaml
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
