@@ -234,7 +234,7 @@ def _async_writer_worker(
     storage_type: str = "local",
     stop_event: threading.Event = None,
 ):
-    logger.info(f"Writer worker {worker_id} started")
+    # logger.info(f"Writer worker {worker_id} started")
     while not (stop_event and stop_event.is_set()):
         try:
             task = write_q.get(timeout=0.5)
@@ -445,8 +445,9 @@ class ActivationGenerator:
             )
 
         # Setup the writer thread pool
-        self.num_writer_threads = os.cpu_count() // 2
-        self.write_q = queue.Queue(256)
+        worker_count = min(16, os.cpu_count() // 4)
+        self.num_writer_threads = worker_count
+        self.write_q = queue.Queue(worker_count)
         self.writer_threads = []
         self._start_writer_threads()
 
