@@ -204,6 +204,18 @@ def parse_arguments():
         default="{}",
         help="JSON string for nnsight model.trace() invoker_args.",
     )
+    parser.add_argument(
+        "--use_remote_model",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use remote model via NDIF.",
+    )
+    parser.add_argument(
+        "--remote_model_config_json",
+        type=str,
+        default="{}",
+        help="JSON string for remote model config.",
+    )
 
     return parser.parse_args()
 
@@ -221,6 +233,7 @@ def main():
     try:
         nnsight_tracer_kwargs = json.loads(args.nnsight_tracer_kwargs_json)
         nnsight_invoker_args = json.loads(args.nnsight_invoker_args_json)
+        remote_model_config = json.loads(args.remote_model_config_json) or None
     except json.JSONDecodeError as e:
         print(f"Error decoding NNsight JSON arguments: {e}")
         print("Please provide valid JSON strings or empty dicts '{}'.")
@@ -257,6 +270,8 @@ def main():
         upload_initial_backoff=args.upload_initial_backoff,
         upload_max_backoff=args.upload_max_backoff,
         enable_profiling=args.enable_profiling,
+        use_remote_model=args.use_remote_model,
+        remote_model_config=remote_model_config,
     )
 
     # Instantiate the generator, passing the config and optional device override

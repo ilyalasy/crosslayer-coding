@@ -4,6 +4,7 @@ from nnsight import LanguageModel
 from tqdm import tqdm
 from typing import Generator, Dict, Tuple, Optional, Union, List
 import logging
+from clt.nnsight.remote import RemoteConfig, create_remote_backend
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,8 @@ class ActivationExtractorCLT:
         nnsight_tracer_kwargs: Optional[Dict] = None,
         nnsight_invoker_args: Optional[Dict] = None,
         batchtopk_k: Optional[int] = None,
+        remote: bool = False,
+        remote_config: Optional[RemoteConfig] = None,
     ):
         """
         Initializes the ActivationExtractorCLT.
@@ -55,6 +58,8 @@ class ActivationExtractorCLT:
             nnsight_tracer_kwargs: Additional kwargs for nnsight model.trace().
             nnsight_invoker_args: Additional invoker_args for nnsight model.trace().
             batchtopk_k: Optional k parameter for BatchTopK.
+            remote: Whether to run model remotely via NDIF.
+            remote_config: Remote config for custom NDIF compatible server.
         """
         self.model_name = model_name
         self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
@@ -86,7 +91,10 @@ class ActivationExtractorCLT:
         }
         self.nnsight_invoker_args = nnsight_invoker_args or {}
 
-        self.model, self.tokenizer = self._load_model_and_tokenizer()
+        self.model, self.tokenizer = self._load_model_and_tokenizer(remote)
+        self.backend = create_remote_backend(self.model.to_model_key(), remote_config) if remote else None
+        if self.backend:
+            logger.info(f"Model '{self.model_name}' initialized with RemoteBackend at '{self.backend.address}'.")
         self.num_layers = self._get_num_layers()
 
     def _resolve_dtype(self, dtype_input: Optional[Union[str, torch.dtype]]) -> Optional[torch.dtype]:
@@ -101,13 +109,14 @@ class ActivationExtractorCLT:
                 return None
         return None
 
-    def _load_model_and_tokenizer(self):
+    def _load_model_and_tokenizer(self, remote: bool = False):
         """Loads the LanguageModel and its tokenizer, passing dtype."""
+
         model = LanguageModel(
             self.model_name,
             device_map=self.device,
             torch_dtype=self.model_dtype,
-            dispatch=True,
+            dispatch=not remote,
         )
         tokenizer = model.tokenizer
         if tokenizer.pad_token is None:
@@ -274,7 +283,7 @@ class ActivationExtractorCLT:
 
                     # Using simpler tracing approach from notebook
                     with torch.no_grad():
-                        with self.model.trace(input_ids):
+                        with self.model.trace(input_ids, backend=self.backend):
                             for layer_idx in range(self.num_layers):
                                 saved_mlp_inputs[layer_idx] = self._get_module_proxy(layer_idx, "input").save()
                                 saved_mlp_outputs[layer_idx] = self._get_module_proxy(layer_idx, "output").save()
@@ -366,7 +375,7 @@ class ActivationExtractorCLT:
                 saved_mlp_outputs = {}
 
                 with torch.no_grad():
-                    with self.model.trace(input_ids):
+                    with self.model.trace(input_ids, backend=self.backend):
                         for layer_idx in range(self.num_layers):
                             saved_mlp_inputs[layer_idx] = self._get_module_proxy(layer_idx, "input").save()
                             saved_mlp_outputs[layer_idx] = self._get_module_proxy(layer_idx, "output").save()

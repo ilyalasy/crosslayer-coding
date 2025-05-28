@@ -461,6 +461,8 @@ class ActivationGenerator:
             prepend_bos=cfg.prepend_bos,
             nnsight_tracer_kwargs=cfg.nnsight_tracer_kwargs,
             nnsight_invoker_args=cfg.nnsight_invoker_args,
+            remote=cfg.use_remote_model,
+            remote_config=cfg.remote_model_config,
         )
         # Paths
         ds_name = os.path.basename(cfg.dataset_path)

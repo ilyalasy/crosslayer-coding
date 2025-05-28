@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Dict, Any
 import logging
+from clt.nnsight.remote import RemoteConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,10 @@ class ActivationConfig:
     # Use field to allow mutable default dict
     nnsight_tracer_kwargs: Dict[str, Any] = field(default_factory=dict)
     nnsight_invoker_args: Dict[str, Any] = field(default_factory=dict)
+    use_remote_model: bool = False  # Whether to run model remotely via NDIF
+    remote_model_config: RemoteConfig = field(
+        default_factory=RemoteConfig
+    )  # Remote config for custom NDIF compatible server
 
     # --- Profiling Control (during generation) ---
     enable_profiling: bool = False  # Whether to enable detailed performance profiling during generation
